@@ -23,29 +23,30 @@ const (
 // Client contains APIKey and optional http.client
 type Client struct {
 	APIKey     string
+	ClientID   string
 	BaseURL    string
 	HTTPClient *http.Client
 }
 
-// EmbeddedRequest contains the request parameters for create_embedded
-type EmbeddedRequest struct {
-	TestMode           bool     `form_field:"test_mode"`
-	ClientID           string   `form_field:"client_id"`
-	FileURL            []string `form_field:"file_url"`
-	File               []string `form_field:"file"`
-	Title              string   `form_field:"title"`
-	Subject            string   `form_field:"subject"`
-	Message            string   `form_field:"message"`
-	SigningRedirectURL string   `form_field:"signing_redirect_url"`
-	Signers            []Signer `form_field:"signers"`
-	// Attachments            []Attachment `form_field:"attachments"`
-	CustomFields     []CustomField     `form_field:"custom_fields"`
-	CCEmailAddresses []string          `form_field:"cc_email_addresses"`
-	UseTextTags      bool              `form_field:"use_text_tags"`
-	HideTextTags     bool              `form_field:"hide_text_tags"`
-	Metadata         map[string]string `form_field:"metadata"`
-	// AllowDecline          int                   `form_field:"allow_decline"`
-	// AllowReassign         int                   `form_field:"allow_reassign"`
+// CreationRequest contains the request parameters for create_embedded
+type CreationRequest struct {
+	TestMode              bool                  `form_field:"test_mode"`
+	ClientID              string                `form_field:"client_id"`
+	FileURL               []string              `form_field:"file_url"`
+	File                  []string              `form_field:"file"`
+	Title                 string                `form_field:"title"`
+	Subject               string                `form_field:"subject"`
+	Message               string                `form_field:"message"`
+	SigningRedirectURL    string                `form_field:"signing_redirect_url"`
+	Signers               []Signer              `form_field:"signers"`
+	Attachments           []Attachment          `form_field:"attachments"`
+	CustomFields          []CustomField         `form_field:"custom_fields"`
+	CCEmailAddresses      []string              `form_field:"cc_email_addresses"`
+	UseTextTags           bool                  `form_field:"use_text_tags"`
+	HideTextTags          bool                  `form_field:"hide_text_tags"`
+	Metadata              map[string]string     `form_field:"metadata"`
+	AllowDecline          bool                  `form_field:"allow_decline"`
+	AllowReassign         bool                  `form_field:"allow_reassign"`
 	FormFieldsPerDocument [][]DocumentFormField `form_field:"form_fields_per_document"`
 	// FieldOptions map[string]string `form_field:"field_options"``
 }
@@ -67,6 +68,13 @@ type DocumentFormField struct {
 	Height   int    `json:"height"`
 	Required bool   `json:"required"`
 	Signer   int    `json:"signer"`
+}
+
+type Attachment struct {
+	Name         string `field:"name"`
+	Instructions string `field:"instructions"`
+	SignerIndex  int    `field:"signer_index"`
+	Required     bool   `field:"required"`
 }
 
 type SignatureRequestResponse struct {
@@ -174,20 +182,28 @@ func (m *Client) WithHTTPClient(httpClient *http.Client) *Client {
 }
 
 // CreateEmbeddedSignatureRequest creates a new embedded signature
-func (m *Client) CreateEmbeddedSignatureRequest(
-	ctx context.Context, embeddedRequest EmbeddedRequest) (*SignatureRequest, error) {
-
-	params, writer, err := m.marshalMultipartRequest(embeddedRequest)
+func (m *Client) createSignatureRequest(ctx context.Context, path string, request CreationRequest) (*SignatureRequest, error) {
+	params, writer, err := m.marshalMultipartRequest(request)
 	if err != nil {
 		return nil, err
 	}
 
-	response, err := m.post(ctx, "signature_request/create_embedded", params, *writer)
+	response, err := m.post(ctx, path, params, *writer)
 	if err != nil {
 		return nil, err
 	}
 
 	return m.sendSignatureRequest(response)
+}
+
+// CreateSignatureRequest creates non-embedded signature request.
+func (m *Client) CreateSignatureRequest(ctx context.Context, request CreationRequest) (*SignatureRequest, error) {
+	return m.createSignatureRequest(ctx, "signature_request/send", request)
+}
+
+// CreateEmbeddedSignatureRequest creates a new embedded signature
+func (m *Client) CreateEmbeddedSignatureRequest(ctx context.Context, request CreationRequest) (*SignatureRequest, error) {
+	return m.createSignatureRequest(ctx, "signature_request/create_embedded", request)
 }
 
 // GetSignatureRequest - Gets a SignatureRequest that includes the current status for each signer.
@@ -218,14 +234,14 @@ func (m *Client) GetEmbeddedSignURL(ctx context.Context, signatureRequestID stri
 }
 
 func (m *Client) SaveFile(ctx context.Context, signatureRequestID, fileType, destFilePath string) (os.FileInfo, error) {
-	bytes, err := m.GetFiles(ctx, signatureRequestID, fileType)
+	byteArray, err := m.GetFiles(ctx, signatureRequestID, fileType)
 
 	out, err := os.Create(destFilePath)
 	if err != nil {
 		return nil, err
 	}
-	out.Write(bytes)
-	out.Close()
+	_, _ = out.Write(byteArray)
+	_ = out.Close()
 
 	info, err := os.Stat(destFilePath)
 	if err != nil {
@@ -333,16 +349,28 @@ func (m *Client) CancelSignatureRequest(ctx context.Context, signatureRequestID 
 	return response, err
 }
 
+// SendSignatureRequest - Creates and sends a new SignatureRequest with the submitted documents.
+func (m *Client) SendSignatureRequest(ctx context.Context, request SignatureRequest) (*http.Response, error) {
+	path := fmt.Sprintf("signature_request/send")
+
+	response, err := m.nakedPost(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+
+	return response, err
+}
+
 // Private Methods
 
 func (m *Client) marshalMultipartRequest(
-	embRequest EmbeddedRequest) (*bytes.Buffer, *multipart.Writer, error) {
+	request CreationRequest) (*bytes.Buffer, *multipart.Writer, error) {
 
 	var b bytes.Buffer
 	w := multipart.NewWriter(&b)
 
-	structType := reflect.TypeOf(embRequest)
-	val := reflect.ValueOf(embRequest)
+	structType := reflect.TypeOf(request)
+	val := reflect.ValueOf(request)
 
 	for i := 0; i < val.NumField(); i++ {
 
@@ -354,7 +382,7 @@ func (m *Client) marshalMultipartRequest(
 
 		switch val.Kind() {
 		case reflect.Map:
-			for k, v := range embRequest.Metadata {
+			for k, v := range request.Metadata {
 				formField, err := w.CreateFormField(fmt.Sprintf("metadata[%v]", k))
 				if err != nil {
 					return nil, nil, err
@@ -364,7 +392,7 @@ func (m *Client) marshalMultipartRequest(
 		case reflect.Slice:
 			switch fieldTag {
 			case "signers":
-				for i, signer := range embRequest.Signers {
+				for i, signer := range request.Signers {
 					email, err := w.CreateFormField(fmt.Sprintf("signers[%v][email_address]", i))
 					if err != nil {
 						return nil, nil, err
@@ -393,8 +421,41 @@ func (m *Client) marshalMultipartRequest(
 						pin.Write([]byte(signer.Pin))
 					}
 				}
+			case "attachments":
+				for i, attachment := range request.Attachments {
+
+					if attachment.Name != "" {
+						name, err := w.CreateFormField(fmt.Sprintf("attachments[%v][name]", i))
+						if err != nil {
+							return nil, nil, err
+						}
+						name.Write([]byte(attachment.Name))
+					}
+					if attachment.Instructions != "" {
+						text, err := w.CreateFormField(fmt.Sprintf("attachments[%v][instructions]", i))
+						if err != nil {
+							return nil, nil, err
+						}
+						text.Write([]byte(attachment.Instructions))
+					}
+
+					order, err := w.CreateFormField(fmt.Sprintf("attachments[%v][signer_index]", i))
+					if err != nil {
+						return nil, nil, err
+					}
+					order.Write([]byte(strconv.Itoa(attachment.SignerIndex)))
+
+					if attachment.Required {
+						required, err := w.CreateFormField(fmt.Sprintf("attachments[%v][required]", i))
+						if err != nil {
+							return nil, nil, err
+						}
+						required.Write([]byte(strconv.Itoa(1)))
+					}
+				}
+
 			case "cc_email_addresses":
-				for k, v := range embRequest.CCEmailAddresses {
+				for k, v := range request.CCEmailAddresses {
 					formField, err := w.CreateFormField(fmt.Sprintf("cc_email_addresses[%v]", k))
 					if err != nil {
 						return nil, nil, err
@@ -402,19 +463,19 @@ func (m *Client) marshalMultipartRequest(
 					formField.Write([]byte(v))
 				}
 			case "form_fields_per_document":
-				if len(embRequest.FormFieldsPerDocument) > 0 {
+				if len(request.FormFieldsPerDocument) > 0 {
 					formField, err := w.CreateFormField(fieldTag)
 					if err != nil {
 						return nil, nil, err
 					}
-					ffpdJSON, err := json.Marshal(embRequest.FormFieldsPerDocument)
+					ffpdJSON, err := json.Marshal(request.FormFieldsPerDocument)
 					if err != nil {
 						return nil, nil, err
 					}
 					formField.Write([]byte(ffpdJSON))
 				}
 			case "file":
-				for i, path := range embRequest.File {
+				for i, path := range request.File {
 					file, _ := os.Open(path)
 
 					formField, err := w.CreateFormFile(fmt.Sprintf("file[%v]", i), file.Name())
@@ -424,7 +485,7 @@ func (m *Client) marshalMultipartRequest(
 					_, err = io.Copy(formField, file)
 				}
 			case "file_url":
-				for i, fileURL := range embRequest.FileURL {
+				for i, fileURL := range request.FileURL {
 					formField, err := w.CreateFormField(fmt.Sprintf("file_url[%v]", i))
 					if err != nil {
 						return nil, nil, err
